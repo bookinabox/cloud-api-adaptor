@@ -56,7 +56,15 @@ func (p *libvirtProvider) CreateInstance(ctx context.Context, podName, sandboxID
 	}
 
 	// TODO: Specify the maximum instance name length in Libvirt
-	vm := &vmConfig{name: instanceName, userData: userData}
+	vm := &vmConfig{name: instanceName, userData: userData, firmware: p.serviceConfig.Firmware, firmwareVars: p.serviceConfig.FirmwareVars}
+
+	switch p.serviceConfig.LaunchSecurity {
+	case "sev":
+		vm.launchSecurityType = SEV
+	case "s390-pv":
+		vm.launchSecurityType = S390PV
+	}
+
 	result, err := CreateDomain(ctx, p.libvirtClient, vm)
 	if err != nil {
 		logger.Printf("failed to create an instance : %v", err)

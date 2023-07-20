@@ -36,6 +36,30 @@ type domainConfig struct {
 	cidataDisk  string
 }
 
+// https://www.amd.com/system/files/TechDocs/55766_SEV-KM_API_Specification.pdf
+type sevGuestPolicy struct {
+	noDebug    bool
+	noKeyShare bool
+	es         bool
+	noSend     bool
+	domain     bool
+	sev        bool
+}
+
+// Struct bitmap to unsigned integer (needed for enabling sev)
+func (s *sevGuestPolicy) getGuestPolicy() uint {
+	bitmap := []bool{s.noDebug, s.noKeyShare, s.es, s.noSend, s.domain, s.sev}
+	res := uint(0)
+
+	for i := 0; i < len(bitmap); i++ {
+		if bitmap[i] {
+			res |= 1 << i
+		}
+	}
+
+	return res
+}
+
 func createCloudInitISO(v *vmConfig, libvirtClient *libvirtClient) string {
 	logger.Printf("Create cloudInit iso\n")
 	cloudInitIso := libvirtClient.dataDir + "/" + v.name + "-cloudinit.iso"
@@ -157,6 +181,20 @@ func getHostCapabilities(conn *libvirt.Connect) (*libvirtxml.Caps, error) {
 	return caps, nil
 }
 
+func getDomainCapabilities(conn *libvirt.Connect, emulatorbin string, arch string, machine string, virttype string, flags uint32) (*libvirtxml.DomainCaps, error) {
+	capsXML, err := conn.GetDomainCapabilities(emulatorbin, arch, machine, virttype, flags)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get domain capabilities, cause: %w", err)
+	}
+	caps := &libvirtxml.DomainCaps{}
+	err = xml.Unmarshal([]byte(capsXML), caps)
+	if err != nil {
+		return nil, fmt.Errorf("unable to unmarshal domain capabilities, cause: %w", err)
+
+	}
+	return caps, nil
+}
+
 // lookupMachine finds the machine name from the set of available machines
 func lookupMachine(machines []libvirtxml.CapsGuestMachine, targetmachine string) string {
 	for _, machine := range machines {
@@ -193,7 +231,7 @@ func getCanonicalMachineName(caps *libvirtxml.Caps, arch string, virttype string
 	return "", fmt.Errorf("cannot find machine type %s for %s/%s in %v", targetmachine, virttype, arch, caps)
 }
 
-func createDomainXMLs390x(client *libvirtClient, cfg *domainConfig) (*libvirtxml.Domain, error) {
+func createDomainXMLs390x(client *libvirtClient, cfg *domainConfig, vm *vmConfig) (*libvirtxml.Domain, error) {
 
 	guest, err := getGuestForArchType(client.caps, archS390x, typeHardwareVirtualMachine)
 	if err != nil {
@@ -244,7 +282,7 @@ func createDomainXMLs390x(client *libvirtClient, cfg *domainConfig) (*libvirtxml
 		},
 	}
 
-	return &libvirtxml.Domain{
+	domain := &libvirtxml.Domain{
 		Type:        "kvm",
 		Name:        cfg.name,
 		Description: "This Virtual Machine is the peer-pod VM",
@@ -311,19 +349,21 @@ func createDomainXMLs390x(client *libvirtClient, cfg *domainConfig) (*libvirtxml
 				},
 			},
 		},
-	}, nil
+	}
+
+	return domain, nil
 
 }
 
-func createDomainXMLx86_64(client *libvirtClient, cfg *domainConfig) (*libvirtxml.Domain, error) {
+func createDomainXMLx86_64(client *libvirtClient, cfg *domainConfig, vm *vmConfig) (*libvirtxml.Domain, error) {
 
 	var diskControllerAddr uint = 0
-	return &libvirtxml.Domain{
+	domain := &libvirtxml.Domain{
 		Type:        "kvm",
 		Name:        cfg.name,
 		Description: "This Virtual Machine is the peer-pod VM",
-		Memory:      &libvirtxml.DomainMemory{Value: uint(cfg.mem), Unit: "GiB", DumpCore: "on"},
-		VCPU:        &libvirtxml.DomainVCPU{Value: uint(cfg.cpu)},
+		Memory:      &libvirtxml.DomainMemory{Value: cfg.mem, Unit: "GiB", DumpCore: "on"},
+		VCPU:        &libvirtxml.DomainVCPU{Value: cfg.cpu},
 		OS: &libvirtxml.DomainOS{
 			Type: &libvirtxml.DomainOSType{Arch: "x86_64", Type: typeHardwareVirtualMachine},
 		},
@@ -378,16 +418,110 @@ func createDomainXMLx86_64(client *libvirtClient, cfg *domainConfig) (*libvirtxm
 				},
 			},
 		},
-	}, nil
+	}
+
+	switch l := vm.launchSecurityType; l {
+	case NoLaunchSecurity:
+		return domain, nil
+	case SEV:
+		return enableSEVSNP(client, cfg, vm, domain)
+	default:
+		return nil, fmt.Errorf("launch Security type is not supported for this domain: %s", l)
+	}
+
+}
+
+func enableSEVSNP(client *libvirtClient, cfg *domainConfig, vm *vmConfig, domain *libvirtxml.Domain) (*libvirtxml.Domain, error) {
+
+	if vm.launchSecurityType != SEV {
+		return nil, fmt.Errorf("launch Seurity must be set as SEV to enable SEV-SNP")
+	}
+
+	const sevMachine = "q35"
+	var diskControllerAddr uint = 0
+
+	var domCapflags uint32 = 0
+	arch := "x86_64"
+	virttype := "qemu"
+
+	// Determine whether machine supports SEV
+	guest, err := getGuestForArchType(client.caps, arch, "hvm")
+	if err != nil {
+		return nil, fmt.Errorf("unable to find guest machine to determine SEV capabilities")
+	}
+	emulator := guest.Arch.Emulator
+	domCaps, err := getDomainCapabilities(client.connection, emulator, arch, sevMachine, virttype, domCapflags)
+	if err != nil {
+		return nil, fmt.Errorf("unable to determine guest domain capabilities: %+v", err)
+	}
+	if domCaps.Features.SEV.Supported != "yes" {
+		return nil, fmt.Errorf("SEV is not supported for this domain")
+	}
+
+	// Enable Launch Security
+	guestPolicyStruct := sevGuestPolicy{
+		noDebug:    false,
+		noKeyShare: true,
+		es:         true,
+		noSend:     false,
+		domain:     false,
+		sev:        false,
+	}
+
+	guestPolicy := guestPolicyStruct.getGuestPolicy()
+
+	domain.LaunchSecurity = &libvirtxml.DomainLaunchSecurity{
+		SEV: &libvirtxml.DomainLaunchSecuritySEV{
+			CBitPos:         &domCaps.Features.SEV.CBitPos,
+			ReducedPhysBits: &domCaps.Features.SEV.ReducedPhysBits,
+			Policy:          &guestPolicy,
+		},
+	}
+
+	domain.OS.Type.Machine = sevMachine
+	domain.OS.Loader = &libvirtxml.DomainLoader{
+		Path:      vm.firmware,
+		Readonly:  "yes",
+		Secure:    "yes",
+		Stateless: "yes",
+		Type:      "pflash",
+	}
+	// Secure boot requires SMM feature enabled
+	domain.Features.SMM = &libvirtxml.DomainFeatureSMM{State: "on"}
+
+	// Must allocate memory (8 GiB) + extra for qemu to use to calculate total memory limit
+	domain.MemoryTune = &libvirtxml.DomainMemoryTune{
+		HardLimit: &libvirtxml.DomainMemoryTuneLimit{
+			Value: 8912896,
+			Unit:  "KiB",
+		},
+	}
+
+	// IDE controllers are unsupported for q35 machines, so must override cidatadisk
+	domain.Devices.Disks[1] = libvirtxml.DomainDisk{
+		Device: "disk",
+		Driver: &libvirtxml.DomainDiskDriver{Name: "qemu", Type: "raw"},
+		Source: &libvirtxml.DomainDiskSource{
+			File: &libvirtxml.DomainDiskSourceFile{File: cfg.cidataDisk},
+		},
+		// Bus cannot be sata. Related?
+		// https://github.com/vagrant-libvirt/vagrant-libvirt/issues/1444
+		Target: &libvirtxml.DomainDiskTarget{Dev: "sdb", Bus: "scsi"},
+		Address: &libvirtxml.DomainAddress{
+			Drive: &libvirtxml.DomainAddressDrive{
+				Controller: &diskControllerAddr, Bus: &diskControllerAddr, Target: &diskControllerAddr, Unit: &diskControllerAddr}},
+	}
+
+	return domain, nil
 }
 
 // createDomainXML detects the machine type of the libvirt host and will return a libvirt XML for that machine type
-func createDomainXML(client *libvirtClient, cfg *domainConfig) (*libvirtxml.Domain, error) {
+func createDomainXML(client *libvirtClient, cfg *domainConfig, vm *vmConfig) (*libvirtxml.Domain, error) {
 	switch client.nodeInfo.Model {
 	case archS390x:
-		return createDomainXMLs390x(client, cfg)
+		return createDomainXMLs390x(client, cfg, vm)
 	default:
-		return createDomainXMLx86_64(client, cfg)
+		return createDomainXMLx86_64(client, cfg, vm)
 	}
 }
 
@@ -399,7 +533,7 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 
 	exists, err := checkDomainExistsByName(v.name, libvirtClient)
 	if err != nil {
-		return nil, fmt.Errorf("Error in checking instance: %s", err)
+		return nil, fmt.Errorf("error in checking instance: %s", err)
 	}
 	if exists {
 		logger.Printf("Instance already exists ")
@@ -411,7 +545,7 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 	rootVolName := v.name + "-root.qcow2"
 	err = createVolume(rootVolName, v.rootDiskSize, libvirtClient.volName, libvirtClient)
 	if err != nil {
-		return nil, fmt.Errorf("Error in creating volume: %s", err)
+		return nil, fmt.Errorf("error in creating volume: %s", err)
 	}
 
 	cloudInitIso := createCloudInitISO(v, libvirtClient)
@@ -419,17 +553,17 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 	isoVolName := v.name + "-cloudinit.iso"
 	isoVolFile, err := uploadIso(cloudInitIso, isoVolName, libvirtClient)
 	if err != nil {
-		return nil, fmt.Errorf("Error in uploading iso volume: %s", err)
+		return nil, fmt.Errorf("error in uploading iso volume: %s", err)
 	}
 
 	rootVol, err := getVolume(libvirtClient, rootVolName)
 	if err != nil {
-		return nil, fmt.Errorf("Error retrieving volume: %s", err)
+		return nil, fmt.Errorf("error retrieving volume: %s", err)
 	}
 
 	rootVolFile, err := rootVol.GetPath()
 	if err != nil {
-		return nil, fmt.Errorf("Error retrieving volume path: %s", err)
+		return nil, fmt.Errorf("error retrieving volume path: %s", err)
 	}
 
 	domainCfg := domainConfig{
@@ -441,33 +575,33 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 		cidataDisk:  isoVolFile,
 	}
 
-	domCfg, err := createDomainXML(libvirtClient, &domainCfg)
+	domCfg, err := createDomainXML(libvirtClient, &domainCfg, v)
 	if err != nil {
-		return nil, fmt.Errorf("error building the libvirt XML, cause: %w", err)
+		return nil, fmt.Errorf("error building the libvirt XML, cause: %+v", err)
 	}
 
 	logger.Printf("Create XML for '%s'", v.name)
 	domXML, err := domCfg.Marshal()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create domain xml: %s", err)
+		return nil, fmt.Errorf("failed to create domain xml: %+v", err)
 	}
 
 	logger.Printf("Creating VM '%s'", v.name)
 	dom, err := libvirtClient.connection.DomainDefineXML(domXML)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to define domain: %s", err)
+		return nil, fmt.Errorf("failed to define domain: %+v", err)
 	}
 
 	// Start Domain.
 	logger.Printf("Starting VM '%s'", v.name)
 	err = dom.Create()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to start VM: %s", err)
+		return nil, fmt.Errorf("failed to start VM: %+v", err)
 	}
 
 	id, err := dom.GetID()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to get domain ID: %s", err)
+		return nil, fmt.Errorf("failed to get domain ID: %+v", err)
 	}
 
 	v.instanceId = strconv.FormatUint(uint64(id), 10)
@@ -479,7 +613,7 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 
 	domInterface, err := dom.ListAllInterfaceAddresses(libvirt.DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to get domain interfaces: %s", err)
+		return nil, fmt.Errorf("failed to get domain interfaces: %+v", err)
 	}
 
 	logger.Printf("domain IP details %v", domInterface)
@@ -489,7 +623,7 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 		logger.Printf("VM IP %s", domInterface[0].Addrs[0].Addr)
 		addr, err := netip.ParseAddr(domInterface[0].Addrs[0].Addr)
 		if err != nil {
-			return nil, fmt.Errorf("Failed to parse address: %s", err)
+			return nil, fmt.Errorf("failed to parse address: %+v", err)
 		}
 		v.ips = append(v.ips, addr)
 		logger.Printf("VM IP list %v", v.ips)

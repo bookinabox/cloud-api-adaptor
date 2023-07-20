@@ -13,14 +13,18 @@ generatorOptions:
   disableNameSuffixHash: true
 
 configMapGenerator:
-- name: peer-pods-cm
-  namespace: confidential-containers-system
-  literals:
+- literals:
   - CLOUD_PROVIDER="libvirt"
-  - LIBVIRT_URI="qemu+ssh://root@192.168.122.1/system?no_verify=1" #set
-  - LIBVIRT_NET="default" # set
-  - LIBVIRT_POOL="default" # set
+  - LIBVIRT_URI="qemu:///system"
+  - LIBVIRT_NET="default"
+  - LIBVIRT_POOL="default"
+  - LIBVIRT_VOL_NAME="podvm-base.qcow2"
+  name: peer-pods-cm
+  namespace: confidential-containers-system
   #- LIBVIRT_VOL_NAME="" # Uncomment and set if you want to use a specific volume name. Defaults to podvm-base.qcow2
+  #- LIBVIRT_LAUNCH_SECURITY="" # sev or s390pv
+  #- LIBVIRT_FIRMWARE="" # OVMF path (for SEV)
+  #- LIBVIRT_FIRMWARE_VARS="" #OVMF_VARS path (for SEV)
   #- PAUSE_IMAGE="" # Uncomment and set if you want to use a specific pause image
   #- VXLAN_PORT="" # Uncomment and set if you want to use a specific vxlan port. Defaults to 4789
 ##TLS_SETTINGS
@@ -30,29 +34,13 @@ configMapGenerator:
   #- TLS_SKIP_VERIFY="" # for testing only
 ##TLS_SETTINGS
 
+  #- auth.json # set - path to auth.json pull credentials file
 secretGenerator:
 - name: auth-json-secret
   namespace: confidential-containers-system
-  files:
-  #- auth.json # set - path to auth.json pull credentials file
-- name: ssh-key-secret
+- files:
+  - id_rsa
+  name: ssh-key-secret
   namespace: confidential-containers-system
-  files: # key generation example: ssh-keygen -f ./id_rsa -N "" && sudo cat id_rsa.pub >> /root/.ssh/authorized_keys
-   #- id_rsa # set - path to private key
 - name: peer-pods-secret
   namespace: confidential-containers-system
-  literals:
-##TLS_SETTINGS
-#- name: certs-for-tls
-#  namespace: confidential-containers-system
-#  files:
-#  - <path_to_ca.crt> # set - relative path to ca.crt, located either in the same folder as the kustomization.yaml file or within a subfolder
-#  - <path_to_client.crt> # set - relative path to client.crt, located either in the same folder as the kustomization.yaml file or within a subfolder
-#  - <path_to_client.key> # set - relative path to client.key, located either in the same folder as the kustomization.yaml file or within a subfolder
-##TLS_SETTINGS
-
-patchesStrategicMerge:
-  #- cri_runtime_endpoint.yaml # set (modify host's runtime cri socket path in the file, default is /run/containerd/containerd.sock)
-##TLS_SETTINGS
-  #- tls_certs_volume_mount.yaml # set (for tls)
-##TLS_SETTINGS
