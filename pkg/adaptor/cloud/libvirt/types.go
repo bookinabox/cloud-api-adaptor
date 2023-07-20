@@ -9,25 +9,31 @@ import (
 	"net/netip"
 
 	libvirt "libvirt.org/go/libvirt"
+	libvirtxml "libvirt.org/go/libvirtxml"
 )
 
 type Config struct {
-	URI         string
-	PoolName    string
-	NetworkName string
-	DataDir     string
-	VolName     string
+	URI            string
+	PoolName       string
+	NetworkName    string
+	DataDir        string
+	VolName        string
+	LaunchSecurity string
+	Firmware       string
 }
 
 type vmConfig struct {
-	name         string
-	cpu          uint
-	mem          uint
-	rootDiskSize uint64
-	userData     string
-	metaData     string
-	ips          []netip.Addr
-	instanceId   string //keeping it consistent with sandbox.vsi
+	name               string
+	cpu                uint
+	mem                uint
+	rootDiskSize       uint64
+	userData           string
+	metaData           string
+	ips                []netip.Addr
+	instanceId         string //keeping it consistent with sandbox.vsi
+	launchSecurityType libvirtxml.DomainLaunchSecurity
+	firmware           string
+	machineType        string
 }
 
 type createDomainOutput struct {

@@ -13,6 +13,8 @@ import (
 	"github.com/confidential-containers/cloud-api-adaptor/pkg/adaptor/cloud"
 	"github.com/confidential-containers/cloud-api-adaptor/pkg/util"
 	"github.com/confidential-containers/cloud-api-adaptor/pkg/util/cloudinit"
+
+	libvirtxml "libvirt.org/go/libvirtxml"
 )
 
 var logger = log.New(log.Writer(), "[adaptor/cloud/libvirt] ", log.LstdFlags|log.Lmsgprefix)
@@ -55,8 +57,21 @@ func (p *libvirtProvider) CreateInstance(ctx context.Context, podName, sandboxID
 		return nil, err
 	}
 
+	var sev libvirtxml.DomainLaunchSecuritySEV
+	var s390pv libvirtxml.DomainLaunchSecurityS390PV
+	var machineType string
+	switch p.serviceConfig.LaunchSecurity {
+	case "sev":
+		sev = libvirtxml.DomainLaunchSecuritySEV{}
+		machineType = "q35"
+	case "s390-pv":
+		s390pv = libvirtxml.DomainLaunchSecurityS390PV{}
+		machineType = "??"
+	}
+	launchSecurity := libvirtxml.DomainLaunchSecurity{SEV: &sev, S390PV: &s390pv}
+
 	// TODO: Specify the maximum instance name length in Libvirt
-	vm := &vmConfig{name: instanceName, userData: userData}
+	vm := &vmConfig{name: instanceName, userData: userData, launchSecurityType: launchSecurity, firmware: p.serviceConfig.Firmware, machineType: machineType}
 	result, err := CreateDomain(ctx, p.libvirtClient, vm)
 	if err != nil {
 		logger.Printf("failed to create an instance : %v", err)

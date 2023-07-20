@@ -166,7 +166,8 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 		Memory:      &libvirtxml.DomainMemory{Value: uint(v.mem), Unit: "GiB", DumpCore: "on"},
 		VCPU:        &libvirtxml.DomainVCPU{Value: uint(v.cpu)},
 		OS: &libvirtxml.DomainOS{
-			Type: &libvirtxml.DomainOSType{Arch: "x86_64", Type: "hvm"},
+			Type:     &libvirtxml.DomainOSType{Arch: "x86_64", Machine: v.machineType, Type: "hvm"},
+			Firmware: v.firmware,
 		},
 		// For Hot-Plug Feature.
 		Features: &libvirtxml.DomainFeatureList{
@@ -219,6 +220,7 @@ func CreateDomain(ctx context.Context, libvirtClient *libvirtClient, v *vmConfig
 				},
 			},
 		},
+		LaunchSecurity: &v.launchSecurityType,
 	}
 
 	logger.Printf("Create XML for '%s'", v.name)
