@@ -32,6 +32,7 @@ type LibvirtProvisioner struct {
 	uri          string           // Libvirt URI
 	wd           string           // libvirt's directory path on this repository
 	volumeName   string           // Podvm volume name
+	clusterName  string           // Cluster name
 }
 
 // LibvirtInstallOverlay implements the InstallOverlay interface
@@ -65,10 +66,20 @@ func NewLibvirtProvisioner(properties map[string]string) (CloudProvisioner, erro
 		uri = properties["libvirt_uri"]
 	}
 
+	vol_name := "podvm-base.qcow2"
+	if properties["libvirt_vol_name"] != "" {
+		vol_name = properties["libvirt_vol_name"]
+	}
+
 	// TODO: accept a different URI.
 	conn, err := libvirt.NewConnect("qemu:///system")
 	if err != nil {
 		return nil, err
+	}
+
+	clusterName := "peer-pods"
+	if properties["cluster_name"] != "" {
+		clusterName = properties["cluster_name"]
 	}
 
 	// TODO: Check network and storage are not nil?
@@ -79,26 +90,36 @@ func NewLibvirtProvisioner(properties map[string]string) (CloudProvisioner, erro
 		storage:      storage,
 		uri:          uri,
 		wd:           wd,
-		volumeName:   "podvm-base.qcow2",
+		volumeName:   vol_name,
+		clusterName:  clusterName,
 	}, nil
 }
 
 func (l *LibvirtProvisioner) CreateCluster(ctx context.Context, cfg *envconf.Config) error {
+
 	cmd := exec.Command("/bin/bash", "-c", "./kcli_cluster.sh create")
 	cmd.Dir = l.wd
 	cmd.Stdout = os.Stdout
 	// TODO: better handle stderr. Messages getting out of order.
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, "CLUSTER_NAME="+l.clusterName)
+	cmd.Env = append(cmd.Env, "LIBVIRT_NETWORK="+l.network)
+	cmd.Env = append(cmd.Env, "LIBVIRT_POOL="+l.storage)
 	err := cmd.Run()
 	if err != nil {
 		return err
 	}
 
-	// TODO: cluster name should be customized.
-	clusterName := "peer-pods"
+	clusterName := l.clusterName
 	home, _ := os.UserHomeDir()
 	kubeconfig := path.Join(home, ".kcli/clusters", clusterName, "auth/kubeconfig")
 	cfg.WithKubeconfigFile(kubeconfig)
+
+	if err := AddNodeRoleWorkerLabel(ctx, clusterName, cfg); err != nil {
+
+		return fmt.Errorf("labeling nodes: %w", err)
+	}
 
 	return nil
 }
@@ -246,11 +267,12 @@ func (lio *LibvirtInstallOverlay) Edit(ctx context.Context, cfg *envconf.Config,
 
 	// Mapping the internal properties to ConfigMapGenerator properties and their default values.
 	mapProps := map[string][2]string{
-		"network":     {"default", "LIBVIRT_NET"},
-		"storage":     {"default", "LIBVIRT_POOL"},
-		"pause_image": {"", "PAUSE_IMAGE"},
-		"uri":         {"qemu+ssh://root@192.168.122.1/system?no_verify=1", "LIBVIRT_URI"},
-		"vxlan_port":  {"", "VXLAN_PORT"},
+		"network":      {"default", "LIBVIRT_NET"},
+		"storage":      {"default", "LIBVIRT_POOL"},
+		"pause_image":  {"", "PAUSE_IMAGE"},
+		"podvm_volume": {"", "LIBVIRT_VOL_NAME"},
+		"uri":          {"qemu+ssh://root@192.168.122.1/system?no_verify=1", "LIBVIRT_URI"},
+		"vxlan_port":   {"", "VXLAN_PORT"},
 	}
 
 	for k, v := range mapProps {

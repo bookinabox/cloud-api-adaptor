@@ -10,40 +10,43 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v4"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v2"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v4"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v2"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	log "github.com/sirupsen/logrus"
 )
 
 type AzureProperties struct {
-	ResourceGroup     *armresources.ResourceGroup
-	CloudProvider     string
-	SubscriptionID    string
-	ClientID          string
-	ClientSecret      string
-	TenantID          string
-	ResourceGroupName string
-	ClusterName       string
-	Location          string
-	SshPrivateKey     string
-	SubnetName        string
-	VnetName          string
-	SubnetID          string
-	ImageID           string
-	SshUserName       string
-	IsAzCliAuth       bool
-	IsCIManaged       bool
+	ResourceGroup       *armresources.ResourceGroup
+	SubscriptionID      string
+	ClientID            string
+	ClientSecret        string
+	TenantID            string
+	ResourceGroupName   string
+	ClusterName         string
+	Location            string
+	SshPrivateKey       string
+	SubnetName          string
+	VnetName            string
+	SubnetID            string
+	ImageID             string
+	SshUserName         string
+	ManagedIdentityName string
+	IsAzCliAuth         bool
+	IsCIManaged         bool
 
 	InstanceSize string
 	NodeName     string
 	OsType       string
 
-	ResourceGroupClient *armresources.ResourceGroupsClient
-	ManagedVnetClient   *armnetwork.VirtualNetworksClient
-	ManagedSubnetClient *armnetwork.SubnetsClient
-	ManagedAksClient    *armcontainerservice.ManagedClustersClient
-	ManagedVmClient     *armcompute.VirtualMachinesClient
+	ResourceGroupClient                *armresources.ResourceGroupsClient
+	ManagedVnetClient                  *armnetwork.VirtualNetworksClient
+	ManagedSubnetClient                *armnetwork.SubnetsClient
+	ManagedAksClient                   *armcontainerservice.ManagedClustersClient
+	ManagedVmClient                    *armcompute.VirtualMachinesClient
+	FederatedIdentityCredentialsClient *armmsi.FederatedIdentityCredentialsClient
+	federatedIdentityCredentialName    string
 }
 
 var AzureProps = &AzureProperties{}
@@ -51,18 +54,18 @@ var AzureProps = &AzureProperties{}
 func initAzureProperties(properties map[string]string) error {
 	log.Trace("initazureProperties()")
 	AzureProps = &AzureProperties{
-		SubscriptionID:    properties["AZURE_SUBSCRIPTION_ID"],
-		ClientID:          properties["AZURE_CLIENT_ID"],
-		ClientSecret:      properties["AZURE_CLIENT_SECRET"],
-		TenantID:          properties["AZURE_TENANT_ID"],
-		ResourceGroupName: properties["RESOURCE_GROUP_NAME"],
-		ClusterName:       properties["CLUSTER_NAME"],
-		Location:          properties["LOCATION"],
-		SshPrivateKey:     properties["SSH_KEY_ID"],
-		CloudProvider:     properties["CLOUD_PROVIDER"],
-		ImageID:           properties["AZURE_IMAGE_ID"],
-		SubnetID:          properties["AZURE_SUBNET_ID"],
-		SshUserName:       properties["SSH_USERNAME"],
+		SubscriptionID:      properties["AZURE_SUBSCRIPTION_ID"],
+		ClientID:            properties["AZURE_CLIENT_ID"],
+		ClientSecret:        properties["AZURE_CLIENT_SECRET"],
+		TenantID:            properties["AZURE_TENANT_ID"],
+		ResourceGroupName:   properties["RESOURCE_GROUP_NAME"],
+		ClusterName:         properties["CLUSTER_NAME"],
+		Location:            properties["LOCATION"],
+		SshPrivateKey:       properties["SSH_KEY_ID"],
+		ImageID:             properties["AZURE_IMAGE_ID"],
+		SubnetID:            properties["AZURE_SUBNET_ID"],
+		SshUserName:         properties["SSH_USERNAME"],
+		ManagedIdentityName: properties["MANAGED_IDENTITY_NAME"],
 	}
 
 	CIManagedStr := properties["IS_CI_MANAGED_CLUSTER"]
@@ -86,20 +89,18 @@ func initAzureProperties(properties map[string]string) error {
 	if AzureProps.SubscriptionID == "" {
 		return errors.New("AZURE_SUBSCRIPTION_ID was not set.")
 	}
-	if AzureProps.ClientID == "" && !AzureProps.IsAzCliAuth {
+
+	// TODO: Right now AZURE_CLIENT_ID can be used by the provisioner
+	// application and the same value is passed on to the CAA app inside the
+	// daemonset. Figure out a way to separate these two.
+	if AzureProps.ClientID == "" {
 		return errors.New("AZURE_CLIENT_ID was not set.")
 	}
 	if AzureProps.ClientSecret == "" && !AzureProps.IsAzCliAuth {
 		return errors.New("AZURE_CLIENT_SECRET was not set")
 	}
-	if AzureProps.TenantID == "" {
-		return errors.New("AZURE_TENANT_ID was not set")
-	}
 	if AzureProps.Location == "" {
 		return errors.New("LOCATION was not set.")
-	}
-	if AzureProps.CloudProvider == "" {
-		return errors.New("CLOUD_PROVIDER was not set.")
 	}
 	if AzureProps.SshPrivateKey == "" {
 		return errors.New("SSH_KEY_ID was not set.")
@@ -116,49 +117,49 @@ func initAzureProperties(properties map[string]string) error {
 
 	err := initManagedClients()
 	if err != nil {
-		return fmt.Errorf("Failed initialising managed clients:%w", err)
+		return fmt.Errorf("initializing managed clients: %w", err)
 	}
+
+	AzureProps.federatedIdentityCredentialName = fmt.Sprintf("%sFederatedIdentityCredential", AzureProps.ClusterName)
 
 	return nil
 }
 
 func initManagedClients() error {
 	log.Trace("initManagedClients()")
+
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating azure credential: %w", err)
 	}
 
-	resourcesClientFactory, err := armresources.NewClientFactory(AzureProps.SubscriptionID, cred, nil)
+	AzureProps.ResourceGroupClient, err = armresources.NewResourceGroupsClient(AzureProps.SubscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("Failed creating resource client factory:%w", err)
+		return fmt.Errorf("creating resource group client: %w", err)
 	}
-	resourceGroupClient := resourcesClientFactory.NewResourceGroupsClient()
 
+	// Use a client factory when creating multiple of these clients.
 	networkClientFactory, err := armnetwork.NewClientFactory(AzureProps.SubscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("Failed creating network client factory:%w", err)
+		return fmt.Errorf("creating network client factory: %w", err)
 	}
-	virtualNetworksClient := networkClientFactory.NewVirtualNetworksClient()
-	subnetsClient := networkClientFactory.NewSubnetsClient()
+	AzureProps.ManagedVnetClient = networkClientFactory.NewVirtualNetworksClient()
+	AzureProps.ManagedSubnetClient = networkClientFactory.NewSubnetsClient()
 
-	computeClientFactory, err := armcompute.NewClientFactory(AzureProps.SubscriptionID, cred, nil)
+	AzureProps.ManagedVmClient, err = armcompute.NewVirtualMachinesClient(AzureProps.SubscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("Failed creating compute client factory:%w", err)
+		return fmt.Errorf("creating virtual machine client: %w", err)
 	}
 
-	virtualMachinesClient := computeClientFactory.NewVirtualMachinesClient()
-
-	containerserviceClientFactory, err := armcontainerservice.NewClientFactory(AzureProps.SubscriptionID, cred, nil)
+	AzureProps.ManagedAksClient, err = armcontainerservice.NewManagedClustersClient(AzureProps.SubscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("Failed creating container service client factory:%w", err)
+		return fmt.Errorf("creating managed cluster client: %w", err)
 	}
-	managedClustersClient := containerserviceClientFactory.NewManagedClustersClient()
 
-	AzureProps.ResourceGroupClient = resourceGroupClient
-	AzureProps.ManagedAksClient = managedClustersClient
-	AzureProps.ManagedVmClient = virtualMachinesClient
-	AzureProps.ManagedSubnetClient = subnetsClient
-	AzureProps.ManagedVnetClient = virtualNetworksClient
+	AzureProps.FederatedIdentityCredentialsClient, err = armmsi.NewFederatedIdentityCredentialsClient(AzureProps.SubscriptionID, cred, nil)
+	if err != nil {
+		return fmt.Errorf("creating federated identity credentials client: %w", err)
+	}
+
 	return nil
 }

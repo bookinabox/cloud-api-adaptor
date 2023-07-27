@@ -4,16 +4,17 @@
 # Build and push csi wrapper images for each arch.
 ---
 name: csi wrapper images
+
 on:
   push:
     branches:
       - 'main'
-      - 'csi-wrapper-images'
     paths:
-    - 'volumes/csi-wrapper/**'
+      - 'volumes/csi-wrapper/**'
+  workflow_dispatch:
 
 env:
-  go_version: "1.20"
+  go_version: "1.20.6"
 
 jobs:
   build_push_job:
@@ -22,15 +23,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        binary: [csi-controller-wrapper, csi-node-wrapper, csi-podvm-wrapper]
-
+        binary:
+          - csi-controller-wrapper
+          - csi-node-wrapper
+          - csi-podvm-wrapper
     steps:
       - name: Checkout the code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
       - name: Setup Golang version ${{ env.go_version }}
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: ${{ env.go_version }}
       - name: Set up Docker Buildx
@@ -50,8 +53,7 @@ jobs:
           push: true
           context: volumes/csi-wrapper
           platforms: linux/amd64, linux/s390x, linux/ppc64le
-          file: |
-            volumes/csi-wrapper/Dockerfile.csi_wrappers
+          file: volumes/csi-wrapper/Dockerfile.csi_wrappers
           build-args: |
             "BINARY=${{matrix.binary}}"
             "SOURCE_FROM=remote"

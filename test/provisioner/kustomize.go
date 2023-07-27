@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/kustomize/pkg/commands/kustfile"
 	"sigs.k8s.io/kustomize/pkg/fs"
 	"sigs.k8s.io/kustomize/pkg/image"
+	"sigs.k8s.io/kustomize/pkg/patch"
 	ktypes "sigs.k8s.io/kustomize/pkg/types"
 )
 
@@ -216,6 +217,33 @@ func (kh *KustomizeOverlay) SetKustomizeSecretGeneratorFile(sgName string, file 
 	}
 
 	return nil
+}
+
+func (kh *KustomizeOverlay) AddToPatchesStrategicMerge(fileName string) error {
+	oldwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err = os.Chdir(kh.configDir); err != nil {
+		return err
+	}
+	defer func() {
+		err = os.Chdir(oldwd)
+	}()
+
+	kf, err := kustfile.NewKustomizationFile(fs.MakeRealFS())
+	if err != nil {
+		return err
+	}
+
+	m, err := kf.Read()
+	if err != nil {
+		return err
+	}
+
+	m.PatchesStrategicMerge = append(m.PatchesStrategicMerge, patch.StrategicMerge(fileName))
+
+	return kf.Write(m)
 }
 
 // SetKustomizeImage updates the kustomization YAML by setting `value` to `key` on the
