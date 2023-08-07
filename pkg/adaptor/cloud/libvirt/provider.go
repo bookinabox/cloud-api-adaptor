@@ -95,5 +95,13 @@ func (p *libvirtProvider) DeleteInstance(ctx context.Context, instanceID string)
 }
 
 func (p *libvirtProvider) Teardown() error {
+
+	ref, err := p.libvirtClient.connection.Close()
+
+	if err != nil {
+		return err
+	}
+	logger.Printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1%s", ref)
+
 	return nil
 }
